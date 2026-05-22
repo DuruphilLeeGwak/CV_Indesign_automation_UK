@@ -1,0 +1,16 @@
+# 생성 결과물
+output/
+
+# 개인정보 포함 완성본 (archive는 로컬 전용)
+archive/
+
+# Adobe 라이선스 파일
+template/
+
+# 개인정보 및 지원 정보가 담긴 TOML 파일
+*.toml
+
+# 임시 파일
+_tmp/
+__pycache__/
+*.pyc
