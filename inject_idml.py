@@ -411,7 +411,7 @@ def xml_exhibitions(self_id, me, job):
     paras.append(p)
     p = para("regular"); c = make_ch(p)
     br(c); br(c)
-    for ex in me["exhibitions"]:
+    for ex in (job.get("exhibitions") or me["exhibitions"]):
         title = f" · {ex['title']}" if ex.get("title") else ""
         content(c, f"{ex['venue']}{title}  ·  {ex['year']}"); br(c)
     paras.append(p)
