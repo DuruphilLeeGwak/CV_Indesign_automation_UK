@@ -425,7 +425,16 @@ def xml_references(self_id, me, job):
     paras.append(p)
     paras.append(blank())
 
-    for i, r in enumerate(me["references"]):
+    references = me.get("references", [])
+    references_note = me.get("references_note", "References available upon request.")
+
+    if not references:
+        p = para("regular"); c = make_ch(p)
+        content(c, references_note); br(c)
+        paras.append(p)
+        return build_story(self_id, paras)
+
+    for i, r in enumerate(references):
         p = para("bold"); c = make_ch(p)
         content(c, r["name"]); br(c)
         paras.append(p)
