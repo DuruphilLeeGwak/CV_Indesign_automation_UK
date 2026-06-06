@@ -2,9 +2,13 @@
 """
 IDML 주입 스크립트 v9
 me.toml (고정) + <Company>_<Position>.toml (회사별) → output/<Name>_<Company>_<Position>.idml
-사용법: python inject_idml.py
+
+사용법:
+  python inject_idml.py                          # 폴더에 toml이 1개일 때 자동 선택
+  python inject_idml.py PrincipleHR_RealtimeVFXArtist   # 특정 toml 지정 (.toml 생략 가능)
 """
 
+import sys
 import zipfile
 import shutil
 import tomllib
@@ -18,19 +22,39 @@ TEMPLATE_IDML = BASE / "template" / "WS_Template.idml"
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# me.toml 제외한 .toml 파일 자동 탐색
-_toml_files = [f for f in BASE.glob("*.toml") if f.name != "me.toml"]
-if len(_toml_files) == 0:
-    raise FileNotFoundError(
-        "input toml 파일이 없습니다.\n"
-        "예: FosterPartners_RealTimeArtist.toml"
-    )
-if len(_toml_files) > 1:
-    raise ValueError(
-        f"toml 파일이 2개 이상입니다: {[f.name for f in _toml_files]}\n"
-        "파일을 1개만 유지해주세요."
-    )
-INPUT = _toml_files[0]
+# 입력 toml 선택
+# ① 인자가 있으면 그 이름의 toml 사용 (.toml 확장자 생략 가능)
+# ② 인자가 없으면 me.toml 제외한 toml이 정확히 1개일 때 자동 선택
+def _resolve_input():
+    if len(sys.argv) > 1:
+        name = sys.argv[1]
+        if not name.endswith(".toml"):
+            name += ".toml"
+        path = BASE / name
+        if not path.exists():
+            available = [f.name for f in BASE.glob("*.toml") if f.name != "me.toml"]
+            raise FileNotFoundError(
+                f"'{name}' 파일을 찾을 수 없습니다.\n"
+                f"사용 가능한 toml: {available}"
+            )
+        return path
+
+    _toml_files = [f for f in BASE.glob("*.toml") if f.name != "me.toml"]
+    if len(_toml_files) == 0:
+        raise FileNotFoundError(
+            "input toml 파일이 없습니다.\n"
+            "예: FosterPartners_RealTimeArtist.toml"
+        )
+    if len(_toml_files) > 1:
+        raise ValueError(
+            f"toml 파일이 2개 이상입니다: {[f.name for f in _toml_files]}\n"
+            "사용할 파일명을 인자로 지정하세요.\n"
+            f"예: python inject_idml.py {_toml_files[0].stem}"
+        )
+    return _toml_files[0]
+
+
+INPUT = _resolve_input()
 
 NS   = "http://ns.adobe.com/AdobeInDesign/idml/1.0/packaging"
 CHAR = "CharacterStyle/$ID/[No character style]"
@@ -56,10 +80,11 @@ _hl_counter = [10]
 
 # ── XML 헬퍼 ──────────────────────────────────────
 
-def make_ch(parent, style=None, font_style=None, point_size=None):
+def make_ch(parent, style=None, font_style=None, point_size=None, fill_color=None):
     attrs = {"AppliedCharacterStyle": style or CHAR}
     if font_style:  attrs["FontStyle"] = font_style
     if point_size:  attrs["PointSize"] = str(point_size)
+    if fill_color:  attrs["FillColor"] = fill_color
     return etree.SubElement(parent, "CharacterStyleRange", **attrs)
 
 
@@ -92,7 +117,7 @@ def blank():
 def make_hyperlink(parent, source_self, url, display_text):
     _hl_counter[0] += 1
     key = str(_hl_counter[0])
-    c_hyp = make_ch(parent, style=HYPR)
+    c_hyp = make_ch(parent, style=HYPR, fill_color="Color/Hyperlink")
     hl = etree.SubElement(c_hyp, "HyperlinkTextSource",
                           Self=source_self,
                           Name=url,
@@ -311,6 +336,51 @@ def xml_languages(self_id, me, job):
     return build_story(self_id, paras)
 
 
+def _work_exp_paras(exps, bullet_space, include_heading=True):
+    """exp 리스트를 단락 리스트로 변환 (공통 헬퍼)"""
+    paras = []
+    if include_heading:
+        p = para("heading"); c = make_ch(p)
+        content(c, "Work Experience"); br(c)
+        paras.append(p)
+        paras.append(blank())
+    for exp in exps:
+        p = para("bold", keep_with_next=True)
+        c = make_ch(p, point_size=12); content(c, exp["title"])
+        c2 = make_ch(p); br(c2)
+        paras.append(p)
+
+        p = para("italic")
+        c = make_ch(p, point_size=11)
+        content(c, f"{exp['company']} · {exp['location']}"); br(c)
+        paras.append(p)
+
+        p = para("regular")
+        c = make_ch(p, point_size=11); content(c, exp["period"])
+        c2 = make_ch(p); br(c2); br(c2)
+        content(c2, exp["intro"]); br(c2); br(c2)
+        paras.append(p)
+
+        for proj in exp.get("projects", []):
+            p = para("italic", keep_with_next=True)
+            c = make_ch(p, font_style="Bold")
+            content(c, proj["name"])
+            c2 = make_ch(p); br(c2)
+            paras.append(p)
+
+            for b in proj["bullets"]:
+                p = para("regular",
+                         left_indent=HANG_LEFT,
+                         first_indent=HANG_FIRST,
+                         space_after=bullet_space)
+                c = make_ch(p)
+                content(c, f"• {b}"); br(c)
+                paras.append(p)
+            paras.append(blank())
+        paras.append(blank())
+    return paras
+
+
 def xml_work_commercial(self_id, me, job):
     bullet_space = job.get("layout", {}).get("bullet_space_after", "2")
     paras = []
@@ -355,6 +425,20 @@ def xml_work_commercial(self_id, me, job):
         paras.append(blank())
 
     return build_story(self_id, paras)
+
+
+def xml_work_dstrict(self_id, me, job):
+    """p2: d'strict 만 (heading 포함)"""
+    bullet_space = job.get("layout", {}).get("bullet_space_after", "2")
+    exps = job["work_commercial"][:1]   # index 0 = d'strict
+    return build_story(self_id, _work_exp_paras(exps, bullet_space, include_heading=True))
+
+
+def xml_work_plinqer(self_id, me, job):
+    """p3: Plinqer 만 (heading 없음 — 템플릿 u278 heading 프레임 유지)"""
+    bullet_space = job.get("layout", {}).get("bullet_space_after", "2")
+    exps = job["work_commercial"][1:]   # index 1 = Plinqer
+    return build_story(self_id, _work_exp_paras(exps, bullet_space, include_heading=False))
 
 
 def xml_work_independent(self_id, me, job):
@@ -463,8 +547,12 @@ def xml_references(self_id, me, job):
 
 
 def xml_cl_date(self_id, me, job):
+    # 실행 시점 날짜 자동 사용 (예: "4 Jun, 2026")
+    from datetime import date as _date
+    today = _date.today()
+    date_str = f"{today.day} {today.strftime('%B')} {today.year}"
     p = para("italic")
-    c = make_ch(p); content(c, job["coverletter"]["date"])
+    c = make_ch(p); content(c, date_str)
     return build_story(self_id, [p])
 
 
@@ -507,26 +595,67 @@ def xml_cl_body(self_id, me, job):
 
 
 def xml_cl_signoff(self_id, me, job):
-    p = para("regular"); c = make_ch(p)
-    content(c, "Yours sincerely,")
-    return build_story(self_id, [p])
+    """cl_signoff 프레임: 'Yours sincerely,' + 서명 (이미지 or 텍스트)
+    me.toml [personal] signature_image = "경로" 로 이미지 서명 지정.
+    """
+    pi = me["personal"]
+    sig_path = pi.get("signature_image", "").strip()
 
+    # "Yours sincerely,"
+    p1 = para("regular"); c1 = make_ch(p1)
+    content(c1, "Yours sincerely,")
+    paras = [p1, blank()]
 
-def xml_cl_signature(self_id, me, job):
-    paras = [blank()]
-    p = para("signature"); c = make_ch(p)
-    content(c, me["personal"]["name"])
-    paras.append(p)
+    if sig_path:
+        # 이미지 서명
+        from pathlib import Path as _Path
+        resolved = (_Path(__file__).parent / sig_path).resolve()
+        uri = resolved.as_uri()
+        p = para("signature"); cr = make_ch(p)
+        rect = etree.SubElement(cr, "Rectangle",
+            Self=f"sig_rect_{self_id}",
+            ContentType="GraphicType",
+            StrokeColor="Swatch/None",
+            FillColor="Swatch/None",
+            GeometricBounds="0 0 36 120")
+        etree.SubElement(rect, "AnchoredObjectSetting",
+            AnchoredPosition="InlinePosition",
+            SpineRelative="false",
+            LockPosition="false",
+            PinPosition="false")
+        img = etree.SubElement(rect, "Image", Self=f"sig_image_{self_id}")
+        etree.SubElement(img, "Link",
+            Self=f"sig_link_{self_id}",
+            LinkResourceURI=uri,
+            LinkClassID="35906",
+            LinkClientID="257",
+            LinkResourceFormat="$ID/PNG",
+            StoredState="Normal",
+            LinkStatus="Normal")
+        paras.append(p)
+    else:
+        # 텍스트 서명 폴백 — "Yours sincerely,"와 동일한 regular 폰트
+        p = para("regular"); c = make_ch(p)
+        content(c, pi["name"])
+        paras.append(p)
+
     return build_story(self_id, paras)
 
 
 # ── Story ID 자동 감지 ────────────────────────────
 
 def get_story_ids(template_path):
+    """labels: ObjectExportOption CustomAltText → storyID
+    unlabeled_list: 텍스트 키 → [storyID, ...] (페이지 순서 보장, 중복 허용)
+    unlabeled: 텍스트 키 → storyID (첫 번째 매치만, 하위 호환)
+    """
     labels = {}
-    unlabeled = {}
+    unlabeled_list = {}   # text_key → [sid, sid, ...]
+    unlabeled = {}        # text_key → sid (첫 번째)
+
     with zipfile.ZipFile(template_path) as z:
-        for name in z.namelist():
+        # 라벨 수집
+        for name in sorted(z.namelist()):   # 페이지 순 정렬
             if not name.startswith("Spreads/"): continue
             tree = etree.fromstring(z.read(name))
             for elem in tree.iter():
@@ -537,16 +666,30 @@ def get_story_ids(template_path):
                         parent = elem.getparent()
                         sid = parent.get("ParentStory", "") if parent is not None else ""
                         labels[alt] = sid
+
         labeled_ids = set(labels.values())
-        for name in z.namelist():
-            if not name.startswith("Stories/"): continue
-            sid = name.replace("Stories/Story_", "").replace(".xml", "")
-            if sid in labeled_ids: continue
-            tree = etree.fromstring(z.read(name))
-            texts = [c.text for c in tree.findall(".//Content") if c.text]
-            if texts:
-                unlabeled[texts[0].strip()[:20]] = sid
-    return labels, unlabeled
+
+        # 페이지 순으로 story 텍스트 수집 (Spread → ParentStory 순)
+        seen_sids = set()
+        for name in sorted(z.namelist()):
+            if not name.startswith("Spreads/"): continue
+            spread_tree = etree.fromstring(z.read(name))
+            for tf in spread_tree.findall(".//{*}TextFrame"):
+                sid = tf.get("ParentStory", "")
+                if not sid or sid in labeled_ids or sid in seen_sids:
+                    continue
+                seen_sids.add(sid)
+                story_path = f"Stories/Story_{sid}.xml"
+                if story_path not in z.namelist(): continue
+                story_tree = etree.fromstring(z.read(story_path))
+                texts = [c.text for c in story_tree.findall(".//Content") if c.text]
+                if texts:
+                    key = texts[0].strip()[:20]
+                    unlabeled_list.setdefault(key, []).append(sid)
+                    if key not in unlabeled:   # 첫 번째만 저장
+                        unlabeled[key] = sid
+
+    return labels, unlabeled, unlabeled_list
 
 
 # ── 메인 ─────────────────────────────────────────
@@ -567,15 +710,23 @@ def main():
     input_stem = INPUT.stem
     out_name   = f"{my_name}_{input_stem}.idml"
 
-    labels, unlabeled = get_story_ids(TEMPLATE_IDML)
+    labels, unlabeled, unlabeled_list = get_story_ids(TEMPLATE_IDML)
 
     def sid(label):
         return labels.get(label, "")
 
     def usid(keyword):
+        """페이지 순 첫 번째 매치"""
         for k, v in unlabeled.items():
             if keyword.lower() in k.lower():
                 return v
+        return ""
+
+    def usid_nth(keyword, n=0):
+        """페이지 순 n번째 매치 (0=첫 번째)"""
+        for k, lst in unlabeled_list.items():
+            if keyword.lower() in k.lower():
+                return lst[n] if n < len(lst) else ""
         return ""
 
     story_builders = {
@@ -589,10 +740,11 @@ def main():
         sid("cv_name_p2"):     lambda s: xml_name_hdr(        s, me, job),
         usid("Skills"):        lambda s: xml_skills(          s, me, job),
         usid("Education"):     lambda s: xml_education(       s, me, job),
-        usid("Work Experien"): lambda s: xml_work_commercial( s, me, job),
+        # p2: d'strict 전용 (usid_nth 0번 = 페이지 순 첫 번째 "Work Experience")
+        usid_nth("Work Experien", 0): lambda s: xml_work_dstrict(     s, me, job),
+        # p3: Plinqer 전용 ("Technical Artist"로 시작하는 신규 분리 프레임)
+        usid("Technical Art"):        lambda s: xml_work_plinqer(     s, me, job),
         # p3
-        # p3 overflow 프레임은 레이블로 감지해서 빈 내용 유지
-        sid("cv_work_commercial_overflow"): lambda s: build_story(s, [blank()]),
         sid("cv_initials_p3"): lambda s: xml_initials(        s, me, job),
         sid("cv_name_p3"):     lambda s: xml_name_hdr(        s, me, job),
         sid("cv_languages"):   lambda s: xml_languages(       s, me, job),
@@ -607,8 +759,8 @@ def main():
         sid("cl_recipient"):   lambda s: xml_cl_recipient(    s, me, job),
         sid("cl_salutation"):  lambda s: xml_cl_salutation(   s, me, job),
         sid("cl_body"):        lambda s: xml_cl_body(         s, me, job),
-        usid("Yours sincerel"):lambda s: xml_cl_signoff(      s, me, job),
-        sid("cl_signoff"):     lambda s: xml_cl_signature(    s, me, job),
+        # cl_signoff 레이블(u425)이 sid()로 처리 — usid 불필요
+        sid("cl_signoff"):     lambda s: xml_cl_signoff(     s, me, job),
         sid("cl_contact"):     lambda s: xml_contact(         s, me, job),
     }
 
@@ -633,10 +785,16 @@ def main():
     patch_designmap(tmp, _hyperlinks)
 
     out_idml = OUTPUT_DIR / out_name
-    with zipfile.ZipFile(out_idml, "w", zipfile.ZIP_DEFLATED) as zout:
-        for f in tmp.rglob("*"):
-            if f.is_file():
-                zout.write(f, f.relative_to(tmp))
+    out_tmp  = OUTPUT_DIR / (out_name + ".tmp")
+    with zipfile.ZipFile(out_tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+        # mimetype: 반드시 첫 항목, 비압축
+        mi = zipfile.ZipInfo("mimetype")
+        mi.compress_type = zipfile.ZIP_STORED
+        zout.writestr(mi, "application/vnd.adobe.indesign-idml-package")
+        for f in sorted(tmp.rglob("*")):
+            if f.is_file() and f.name != "mimetype":
+                zout.write(f, f.relative_to(tmp).as_posix())  # Windows 경로 슬래시 통일
+    out_tmp.replace(out_idml)
 
     shutil.rmtree(tmp)
     print(f"\n  ✅ 완료: output/{out_name}")
